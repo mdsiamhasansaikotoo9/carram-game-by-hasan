@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pixel Carrom — Windows</title>
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:18px;background:#111625;color:#f5f4ed;font-family:system-ui,Segoe UI,Arial,sans-serif}
+.wrap{width:min(100%,960px)}h1{margin:0 0 4px;letter-spacing:.07em}.sub{margin:0 0 14px;color:#b9c4d9}
+.layout{display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:14px;align-items:start}
+canvas{display:block;width:100%;height:auto;border-radius:12px;border:2px solid #b7834c;box-shadow:0 18px 50px #0008;background:#c9955b;touch-action:none}
+.panel{background:#1b2234;border:1px solid #35415d;border-radius:10px;padding:14px;margin-bottom:12px}.panel h3{margin:0 0 8px;font-size:1rem}.panel p{margin:5px 0;color:#c8d2e8;line-height:1.45;font-size:.92rem}
+button{border:0;border-radius:8px;padding:10px 14px;background:#f2b84b;color:#201a12;font-weight:800;cursor:pointer}.secondary{background:#303b56;color:#fff;border:1px solid #4a5877}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.score{font-size:1.2rem;font-weight:800;color:#f2b84b}.small{font-size:.82rem!important;color:#9eaccb!important}
+input[type=range]{width:100%;accent-color:#f2b84b}
+@media(max-width:760px){.layout{grid-template-columns:1fr}.side{display:grid;grid-template-columns:1fr 1fr;gap:10px}.panel{margin-bottom:0}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>PIXEL CARROM</h1>
+<p class="sub">A simple carrom-board game for Windows — aim, set your power, and pocket the coins.</p>
+<div class="layout">
+  <div>
+    <canvas id="board" width="720" height="720" aria-label="Carrom board game"></canvas>
+    <div class="actions">
+      <button id="shoot">Shoot (Space / Enter)</button>
+      <button class="secondary" id="reset">New Game</button>
+      <button class="secondary" id="toggle">Aim: On</button>
+    </div>
+  </div>
+  <div class="side">
+    <div class="panel">
+      <h3>Match</h3>
+      <p>Turn: <span class="score" id="turn">Player 1</span></p>
+      <p>Player 1 (white): <strong id="s1">0</strong></p>
+      <p>Player 2 (black): <strong id="s2">0</strong></p>
+      <p>Coins remaining: <strong id="remaining">19</strong></p>
+    </div>
+    <div class="panel">
+      <h3>Controls</h3>
+      <p><strong>Mouse:</strong> move to aim, click and drag backward from striker to set shot direction, release to shoot.</p>
+      <p><strong>Keyboard:</strong> A/D or ←/→ aim, W/S or ↑/↓ power, Space/Enter shoot.</p>
+      <p class="small">Pocket a coin to score. Pocketing your own color earns 1 point. Queen earns 3 points. This is a casual local two-player version.</p>
+    </div>
+    <div class="panel">
+      <h3>Shot power</h3>
+      <input id="power" type="range" min="3" max="14" value="8">
+      <p>Power: <strong id="powerLabel">8</strong></p>
+      <p id="status">Player 1's turn. Take your shot!</p>
+    </div>
+  </div>
+</div>
+</div>
+<script>
+(() => {
+const canvas=document.getElementById('board'),ctx=canvas.getContext('2d');
+const N=720, left=78,right=642,top=78,bottom=642,center=N/2;
+const pockets=[{x:91,y:91},{x:629,y:91},{x:91,y:629},{x:629,y:629}];
+const el=id=>document.getElementById(id);
+let coins=[],striker,turn=1,scores=[0,0],aimAngle=-Math.PI/2,showAim=true,dragging=false,dragStart=null,dragNow=null, moving=false,gameOver=false;
+const powerInput=el('power');
+function coin(x,y,r,color,kind='coin',owner=0){return {x,y,vx:0,vy:0,r,color,kind,owner,alive:true};}
+function reset(){
+ coins=[];scores=[0,0];turn=1;gameOver=false;moving=false;dragging=false;
+ // classic 9 white, 9 black, queen in a tight hexagon around center
+ coins.push(coin(center,center,12,'#c62832','queen'));
+ const ring1=31,ring2=58;
+ for(let i=0;i<6;i++){let a=i*Math.PI/3;coins.push(coin(center+Math.cos(a)*ring1,center+Math.sin(a)*ring1,11,'#f6eee0','coin',1));}
+ for(let i=0;i<6;i++){let a=i*Math.PI/3+Math.PI/6;coins.push(coin(center+Math.cos(a)*ring1,center+Math.sin(a)*ring1,11,'#292a30','coin',2));}
+ for(let i=0;i<6;i++){let a=i*Math.PI/3;coins.push(coin(center+Math.cos(a)*ring2,center+Math.sin(a)*ring2,11,i%2?'#292a30':'#f6eee0','coin',i%2?2:1));}
+ striker=coin(center,turn===1?bottom-94:top+94,15,'#e6b74f','striker',turn);
+ aimAngle=turn===1?-Math.PI/2:Math.PI/2;
+ updateUI();draw();
+}
+function updateUI(){
+ el('turn').textContent=gameOver?'Game Over':`Player ${turn}`;
+ el('s1').textContent=scores[0];el('s2').textContent=scores[1];
+ el('remaining').textContent=coins.filter(c=>c.alive).length;
+ el('powerLabel').textContent=powerInput.value;
+}
+function setStatus(s){el('status').textContent=s;}
+function boardPoint(e){
+ const r=canvas.getBoundingClientRect();
+ return {x:(e.clientX-r.left)*N/r.width,y:(e.clientY-r.top)*N/r.height};
+}
+function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+function shoot(){
+ if(moving||gameOver)return;
+ const p=Number(powerInput.value),speed=p*0.72;
+ striker.vx=Math.cos(aimAngle)*speed;striker.vy=Math.sin(aimAngle)*speed;
+ moving=true;dragging=false;dragStart=dragNow=null;setStatus(`Player ${turn} shot!`);
+}
+canvas.addEventListener('pointerdown',e=>{
+ if(moving||gameOver)return;
+ const p=boardPoint(e);
+ // click/drag from anywhere: aim toward the point from striker; dragging opposite direction gives stronger shot
+ dragging=true;dragStart=p;dragNow=p;canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove',e=>{
+ const p=boardPoint(e);
+ if(dragging){dragNow=p;const dx=striker.x-p.x,dy=striker.y-p.y;if(Math.hypot(dx,dy)>5)aimAngle=Math.atan2(dy,dx);}
+ else if(!moving&&!gameOver){aimAngle=Math.atan2(p.y-striker.y,p.x-striker.x);}
+ draw();
+});
+canvas.addEventListener('pointerup',e=>{
+ if(!dragging)return;const p=boardPoint(e);dragNow=p;
+ const dx=striker.x-p.x,dy=striker.y-p.y;
+ if(Math.hypot(dx,dy)>10){aimAngle=Math.atan2(dy,dx);powerInput.value=String(Math.round(clamp(Math.hypot(dx,dy)/15,3,14)));shoot();}
+ else {aimAngle=Math.atan2(p.y-striker.y,p.x-striker.x);dragging=false;draw();}
+});
+el('shoot').onclick=shoot;el('reset').onclick=reset;
+el('toggle').onclick=()=>{showAim=!showAim;el('toggle').textContent=`Aim: ${showAim?'On':'Off'}`;draw();};
+powerInput.oninput=()=>{el('powerLabel').textContent=powerInput.value;draw();};
+window.addEventListener('keydown',e=>{
+ if(['Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.code))e.preventDefault();
+ if(moving||gameOver)return;
+ if(e.code==='ArrowLeft'||e.code==='KeyA')aimAngle-=.08;
+ if(e.code==='ArrowRight'||e.code==='KeyD')aimAngle+=.08;
+ if(e.code==='ArrowUp'||e.code==='KeyW')powerInput.value=String(Math.min(14,+powerInput.value+1));
+ if(e.code==='ArrowDown'||e.code==='KeyS')powerInput.value=String(Math.max(3,+powerInput.value-1));
+ el('powerLabel').textContent=powerInput.value;
+ if(e.code==='Space'||e.code==='Enter')shoot();
+ draw();
+});
+function wallBounce(c){
+ const minX=left+c.r,maxX=right-c.r,minY=top+c.r,maxY=bottom-c.r;
+ if(c.x<minX){c.x=minX;c.vx=Math.abs(c.vx)*.78;}
+ if(c.x>maxX){c.x=maxX;c.vx=-Math.abs(c.vx)*.78;}
+ if(c.y<minY){c.y=minY;c.vy=Math.abs(c.vy)*.78;}
+ if(c.y>maxY){c.y=maxY;c.vy=-Math.abs(c.vy)*.78;}
+}
+function physics(){
+ if(!moving)return;
+ const all=[...coins.filter(c=>c.alive),striker];
+ for(let sub=0;sub<2;sub++){
+  for(const c of all){
+   c.x+=c.vx/2;c.y+=c.vy/2;
+   // pocket test
+   for(const p of pockets){if(Math.hypot(c.x-p.x,c.y-p.y)<27){
+    if(c.kind==='striker'){c.x=center;c.y=turn===1?bottom-94:top+94;c.vx=c.vy=0;setStatus('Foul: striker pocketed. Turn passes.');}
+    else if(c.alive){c.alive=false;let pts=c.kind==='queen'?3:1;scores[turn-1]+=pts;setStatus(c.kind==='queen'?`Queen pocketed! +${pts} points.`:`Coin pocketed! +${pts} point.`);}
+    break;
+   }}
+   if(c.kind!=='striker'&& !c.alive)continue;
+   if(!(c.kind==='striker'&&Math.hypot(c.x-center,c.y-(turn===1?bottom-94:top+94))<1&&c.vx===0&&c.vy===0))wallBounce(c);
+  }
+  // collisions
+  const live=all.filter(c=>c.kind==='striker'||c.alive);
+  for(let i=0;i<live.length;i++)for(let j=i+1;j<live.length;j++){
+   const a=live[i],b=live[j],dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy),min=a.r+b.r;
+   if(d>0&&d<min){
+    const nx=dx/d,ny=dy/d,overlap=min-d;
+    a.x-=nx*overlap/2;a.y-=ny*overlap/2;b.x+=nx*overlap/2;b.y+=ny*overlap/2;
+    const rel=(a.vx-b.vx)*nx+(a.vy-b.vy)*ny;
+    if(rel>0){const impulse=rel*.88;a.vx-=impulse*nx;a.vy-=impulse*ny;b.vx+=impulse*nx;b.vy+=impulse*ny;}
+   }
+  }
+ }
+ let still=false;
+ for(const c of all){c.vx*=.986;c.vy*=.986;if(Math.hypot(c.vx,c.vy)<.08)c.vx=c.vy=0;else still=true;}
+ if(!still){
+  moving=false;
+  if(coins.every(c=>!c.alive)){gameOver=true;setStatus(`Game over! Player ${scores[0]>=scores[1]?1:2} wins.`);}
+  else {turn=turn===1?2:1;striker.x=center;striker.y=turn===1?bottom-94:top+94;striker.vx=striker.vy=0;striker.owner=turn;aimAngle=turn===1?-Math.PI/2:Math.PI/2;if(!gameOver)setStatus(`Player ${turn}'s turn. Aim and shoot!`);}
+  updateUI();
+ }
+}
+function drawBoard(){
+ ctx.clearRect(0,0,N,N);
+ ctx.fillStyle='#bd8248';ctx.fillRect(0,0,N,N);
+ ctx.fillStyle='#d9aa70';ctx.fillRect(28,28,N-56,N-56);
+ // wood grain
+ for(let i=0;i<14;i++){ctx.strokeStyle=i%2?'#c89158':'#e3b77f';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(35,42+i*47);ctx.lineTo(685,42+i*47);ctx.stroke();}
+ ctx.fillStyle='#8b4f2b';ctx.fillRect(left,top,right-left,bottom-top);
+ ctx.fillStyle='#f1d7a7';ctx.fillRect(left+16,top+16,right-left-32,bottom-top-32);
+ ctx.strokeStyle='#7b3e23';ctx.lineWidth=4;ctx.strokeRect(left+26,top+26,right-left-52,bottom-top-52);
+ // baseline and circles
+ for(const y of [top+94,bottom-94]){
+  ctx.strokeStyle='#9d332b';ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(center-145,y);ctx.lineTo(center+145,y);ctx.stroke();
+  for(const x of [center-145,center+145]){ctx.beginPath();ctx.arc(x,y,10,0,Math.PI*2);ctx.fillStyle='#9d332b';ctx.fill();}
+  ctx.beginPath();ctx.arc(center,y,28,0,Math.PI*2);ctx.stroke();
+ }
+ ctx.strokeStyle='#9d332b';ctx.lineWidth=3;ctx.beginPath();ctx.arc(center,center,75,0,Math.PI*2);ctx.stroke();ctx.beginPath();ctx.arc(center,center,47,0,Math.PI*2);ctx.stroke();
+ ctx.fillStyle='#9d332b';ctx.beginPath();ctx.arc(center,center,7,0,Math.PI*2);ctx.fill();
+ // pockets
+ for(const p of pockets){ctx.fillStyle='#2a1b19';ctx.beginPath();ctx.arc(p.x,p.y,25,0,Math.PI*2);ctx.fill();ctx.strokeStyle='#f4d8a4';ctx.lineWidth=4;ctx.beginPath();ctx.arc(p.x,p.y,28,0,Math.PI*2);ctx.stroke();}
+}
+function drawCoin(c){
+ if(c.kind!=='striker'&&!c.alive)return;
+ ctx.save();ctx.translate(c.x,c.y);
+ ctx.fillStyle='#0004';ctx.beginPath();ctx.arc(2,3,c.r+1,0,Math.PI*2);ctx.fill();
+ ctx.fillStyle=c.color;ctx.beginPath();ctx.arc(0,0,c.r,0,Math.PI*2);ctx.fill();
+ ctx.strokeStyle=c.kind==='striker'?'#fff0ad':'#7c6044';ctx.lineWidth=c.kind==='striker'?3:1.5;ctx.beginPath();ctx.arc(0,0,c.r-2,0,Math.PI*2);ctx.stroke();
+ if(c.kind==='queen'){ctx.fillStyle='#f6d66a';ctx.beginPath();ctx.arc(0,0,4,0,Math.PI*2);ctx.fill();}
+ if(c.kind==='striker'){ctx.strokeStyle='#fff4c4';ctx.lineWidth=2;ctx.beginPath();ctx.arc(0,0,7,0,Math.PI*2);ctx.stroke();}
+ ctx.restore();
+}
+function draw(){
+ drawBoard();
+ for(const c of coins)drawCoin(c);
+ drawCoin(striker);
+ if(showAim&&!moving&&!gameOver){
+  const len=70+Number(powerInput.value)*4;
+  ctx.setLineDash([7,6]);ctx.strokeStyle=turn===1?'#2d82cf':'#d64a4a';ctx.lineWidth=3;
+  ctx.beginPath();ctx.moveTo(striker.x,striker.y);ctx.lineTo(striker.x+Math.cos(aimAngle)*len,striker.y+Math.sin(aimAngle)*len);ctx.stroke();ctx.setLineDash([]);
+  const ax=striker.x+Math.cos(aimAngle)*len,ay=striker.y+Math.sin(aimAngle)*len;
+  ctx.fillStyle=turn===1?'#2d82cf':'#d64a4a';ctx.beginPath();ctx.arc(ax,ay,5,0,Math.PI*2);ctx.fill();
+ }
+ updateUI();
+}
+function loop(){physics();draw();requestAnimationFrame(loop);}
+reset();loop();
+})();
+</script>
+</body>
+</html>
